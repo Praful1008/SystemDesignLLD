@@ -1,60 +1,40 @@
 package com.pratik.rate_limiter.service;
 
-import java.time.Instant;
-import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.springframework.stereotype.Service;
+import com.pratik.rate_limiter.entity.RateLimitConfig;
+import com.pratik.rate_limiter.entity.User;
+import com.pratik.rate_limiter.enums.RateLimitType;
+import com.pratik.rate_limiter.enums.UserTier;
+import com.pratik.rate_limiter.factory.RateLimiterFactory;
+import com.pratik.rate_limiter.limiter.RateLimiter;
 
-import com.pratik.rate_limiter.dto.RateLimitResponse;
-import com.pratik.rate_limiter.repository.RateLimiterRepository;
 
 @Service
 public class RateLimiterService {
 
-    private static final long TIME_WINDOW_MILLIS = 60_000;
-    private static final int MAX_REQUESTS = 100;
+    private final Map<UserTier, RateLimiter> rateLimiters = new HashMap<>();
 
-    private final RateLimiterRepository rateLimiterRepositoryRepository;
+    public RateLimiterService(){
+        rateLimiters.put(UserTier.FREE,
+            RateLimiterFactory.createRateLimiter(
+                RateLimitType.TOKEN_BUCKET, new RateLimitConfig(10, 60)) // 6 requests in 60 seconds
+        );
 
-    public RateLimiterService(RateLimiterRepository rateLimiterRepositoryRepository) {
-        this.rateLimiterRepositoryRepository = rateLimiterRepositoryRepository;
-    }
-
-    public RateLimitResponse evaluateRequest(String apiKey) {
-        long now = Instant.now().toEpochMilli();
-        Deque<Long> timestamps = rateLimiterRepositoryRepository.getUserRequestCounts(apiKey);
-
-        evictExpiredRequests(timestamps, now);
-
-        boolean allowed = timestamps.size() < MAX_REQUESTS;
-
-        if (allowed) {
-            rateLimiterRepositoryRepository.addUserRequestCounts(apiKey, now);
-        }
-
-        int remaining = Math.max(0, MAX_REQUESTS - timestamps.size());
-        long resetSeconds = calculateResetTimeSeconds(timestamps, now);
-
-        return new RateLimitResponse(
-                allowed,
-                MAX_REQUESTS,
-                remaining,
-                resetSeconds
+        rateLimiters.put(UserTier.PREMIUM,
+            RateLimiterFactory.createRateLimiter(
+                RateLimitType.SLIDING_WINDOW_LOG, new RateLimitConfig(100, 60)) // 100 requests in 60 seconds
         );
     }
 
-    private void evictExpiredRequests(Deque<Long> timestamps, long now) {
-        while (!timestamps.isEmpty() && now - timestamps.peekFirst() > TIME_WINDOW_MILLIS) {
-            timestamps.pollFirst();
-        }
-    }
+    public boolean allowRequest(User user){
+        RateLimiter limiter = rateLimiters.get(user.getTier());
+        if(limiter == null)
+            throw new IllegalArgumentException("No limiter configured");
 
-    private long calculateResetTimeSeconds(Deque<Long> timestamps, long now) {
-        if (timestamps.isEmpty()) {
-            return TIME_WINDOW_MILLIS / 1000;
-        }
-        long oldest = timestamps.peekFirst();
-        return Math.max(0, (TIME_WINDOW_MILLIS - (now - oldest)) / 1000);
+        return limiter.allowRequest(user.getUserId());
     }
 }
 
